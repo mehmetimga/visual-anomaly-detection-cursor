@@ -1,0 +1,74 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Go
+api-go/vendor/
+api-go/bin/
+api-go/*.exe
+api-go/*.exe~
+api-go/*.dll
+api-go/*.so
+api-go/*.dylib
+api-go/*.test
+api-go/*.out
+api-go/go.sum
+
+# Python
+embed-fastapi/__pycache__/
+embed-fastapi/*.py[cod]
+embed-fastapi/*$py.class
+embed-fastapi/*.so
+embed-fastapi/.Python
+embed-fastapi/env/
+embed-fastapi/venv/
+embed-fastapi/ENV/
+embed-fastapi/.venv
+embed-fastapi/.pytest_cache/
+embed-fastapi/.coverage
+embed-fastapi/htmlcov/
+embed-fastapi/.tox/
+embed-fastapi/*.egg-info/
+embed-fastapi/dist/
+
+# Node
+web/node_modules/
+web/dist/
+web/build/
+web/.DS_Store
+web/*.log
+web/npm-debug.log*
+web/yarn-debug.log*
+web/yarn-error.log*
+web/.eslintcache
+
+# Docker volumes
+deploy/qdrant_storage/
+deploy/minio_data/
+deploy/postgres_data/
+deploy/redis_data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
