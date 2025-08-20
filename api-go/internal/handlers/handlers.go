@@ -269,7 +269,7 @@ func (h *Handlers) IngestImage(c *gin.Context) {
 
 	// Create Qdrant point with integer ID
 	point := qdrant.Point{
-		ID: time.Now().UnixNano(),
+		ID:     time.Now().UnixNano(),
 		Vector: embedding,
 		Payload: qdrant.Payload{
 			"image_id": imageID,
@@ -442,10 +442,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 
 		// Perform search
 		searchReq := qdrant.SearchRequest{
-			Vector: map[string]interface{}{
-				"name":   "clip_global",
-				"vector": embedding,
-			},
+			Vector:      embedding,
 			Filter:      req.Filter,
 			Limit:       req.Limit,
 			WithPayload: req.IncludePayload,
@@ -494,10 +491,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 	if embedding != nil {
 		// Default search parameters for multipart
 		searchReq := qdrant.SearchRequest{
-			Vector: map[string]interface{}{
-				"name":   "clip_global",
-				"vector": embedding,
-			},
+			Vector:      embedding,
 			Filter:      nil, // No user filtering for learning project
 			Limit:       10,
 			WithPayload: true,
@@ -662,14 +656,14 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 	// For each point, find its nearest neighbor and compute distance
 	var anomalies []gin.H
 
-		for _, point := range points {
+	for _, point := range points {
 		// Search for nearest neighbors excluding self
 		searchReq := qdrant.SearchRequest{
-			Vector:       point.Vector,
-			Filter:       map[string]interface{}{}, // No user filtering for learning project
-			Limit:        2,                        // Self + 1 nearest
-			WithPayload:  true,
-			WithVector:   false,
+			Vector:      point.Vector,
+			Filter:      map[string]interface{}{}, // No user filtering for learning project
+			Limit:       2,                        // Self + 1 nearest
+			WithPayload: true,
+			WithVector:  false,
 		}
 
 		results, err := h.qdrant.Search(c.Request.Context(), searchReq)
@@ -796,7 +790,7 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 
 			// query nearest neighbors by seed id (no user filtering for learning project)
 			filter := map[string]interface{}{}
-			neighbors, err := h.qdrant.SearchByPoint(c.Request.Context(), "clip_global", seed.id, 10, filter, req.ScoreThreshold)
+			neighbors, err := h.qdrant.SearchByPoint(c.Request.Context(), seed.id, 10, filter, req.ScoreThreshold)
 			if err == nil {
 				for _, nb := range neighbors {
 					if nb.ID == seed.id {

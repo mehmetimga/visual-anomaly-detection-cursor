@@ -229,11 +229,10 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult,
 	return result.Result, nil
 }
 
-func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID interface{}, limit int, filter map[string]interface{}, scoreThreshold *float32) ([]SearchResult, error) {
+func (c *Client) SearchByPoint(ctx context.Context, pointID interface{}, limit int, filter map[string]interface{}, scoreThreshold *float32) ([]SearchResult, error) {
 	filterWrapped := buildQdrantFilter(filter)
 	req := SearchByPointRequest{
 		Vector:         map[string]interface{}{"id": pointID},
-		VectorName:     vectorName, // This maps to "using" in JSON
 		Filter:         filterWrapped,
 		Limit:          limit,
 		WithPayload:    true,

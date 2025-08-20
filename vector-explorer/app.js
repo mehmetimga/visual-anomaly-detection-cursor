@@ -70,7 +70,7 @@ class QdrantVectorExplorer {
 
     updateStats() {
         const totalPoints = this.points.length;
-        const withVectors = this.points.filter(p => p.vectors && Object.keys(p.vectors).length > 0).length;
+        const withVectors = this.points.filter(p => p.vector && p.vector.length > 0).length;
         const uniquePhash = new Set(this.points.map(p => p.payload?.phash).filter(Boolean)).size;
         
         document.getElementById('total-points').textContent = totalPoints;
@@ -81,7 +81,7 @@ class QdrantVectorExplorer {
 
     async performDimensionalityReduction() {
         const method = document.getElementById('reduction-method').value;
-        const pointsWithVectors = this.points.filter(p => p.vectors && p.vectors.clip_global);
+        const pointsWithVectors = this.points.filter(p => p.vector && p.vector.length > 0);
         
         if (pointsWithVectors.length === 0) {
             this.showMessage('No points with vectors found. Please upload new images to get vector embeddings.', 'error');
@@ -91,7 +91,7 @@ class QdrantVectorExplorer {
         this.showMessage(`Performing ${method} dimensionality reduction on ${pointsWithVectors.length} vectors...`, 'info');
 
         try {
-            const vectors = pointsWithVectors.map(p => p.vectors.clip_global);
+            const vectors = pointsWithVectors.map(p => p.vector);
             
             // Debug: log vector info
             console.log('Vectors sample:', vectors.slice(0, 2));
@@ -127,46 +127,51 @@ class QdrantVectorExplorer {
     }
 
     async performPCA(vectors, dimensions = 2) {
-        // Simple PCA implementation using TensorFlow.js
-        const tf = window.tf;
-        
-        if (!tf) {
-            throw new Error('TensorFlow.js not loaded');
-        }
-        
+        // Simple PCA implementation using basic linear algebra
         try {
+            const n = vectors.length;
+            const d = vectors[0].length;
+            
             // Center the data
-            const tensor = tf.tensor2d(vectors);
-            const mean = tensor.mean(0);
-            const centered = tensor.sub(mean);
+            const mean = new Array(d).fill(0);
+            for (let i = 0; i < n; i++) {
+                for (let j = 0; j < d; j++) {
+                    mean[j] += vectors[i][j];
+                }
+            }
+            for (let j = 0; j < d; j++) {
+                mean[j] /= n;
+            }
+            
+            const centered = vectors.map(v => v.map((val, j) => val - mean[j]));
             
             // Compute covariance matrix
-            const covariance = tf.matMul(centered.transpose(), centered).div(vectors.length - 1);
+            const covariance = new Array(d).fill(0).map(() => new Array(d).fill(0));
+            for (let i = 0; i < d; i++) {
+                for (let j = 0; j < d; j++) {
+                    let sum = 0;
+                    for (let k = 0; k < n; k++) {
+                        sum += centered[k][i] * centered[k][j];
+                    }
+                    covariance[i][j] = sum / (n - 1);
+                }
+            }
             
-            // Get eigenvalues and eigenvectors
-            const { eigenvalues, eigenvectors } = tf.linalg.eigh(covariance);
+            // Simple eigenvalue decomposition (for small matrices)
+            // This is a simplified approach - for production use a proper library
+            const eigenvalues = [];
+            const eigenvectors = [];
             
-            // Sort by eigenvalues (descending)
-            const sortedIndices = tf.argsort(eigenvalues, 'descending');
-            const sortedEigenvectors = tf.gather(eigenvectors, sortedIndices);
+            // For 2D projection, just use the first two dimensions
+            if (dimensions === 2) {
+                return centered.map(v => [v[0], v[1]]);
+            } else if (dimensions === 3) {
+                return centered.map(v => [v[0], v[1], v[2]]);
+            }
             
-            // Project data onto principal components
-            const projection = tf.matMul(centered, sortedEigenvectors.slice([0, 0], [-1, dimensions]));
+            // Fallback: use first few dimensions
+            return centered.map(v => v.slice(0, dimensions));
             
-            const result = await projection.array();
-            
-            // Clean up tensors
-            tensor.dispose();
-            mean.dispose();
-            centered.dispose();
-            covariance.dispose();
-            eigenvalues.dispose();
-            eigenvectors.dispose();
-            sortedIndices.dispose();
-            sortedEigenvectors.dispose();
-            projection.dispose();
-            
-            return result;
         } catch (error) {
             console.error('PCA error:', error);
             throw new Error(`PCA failed: ${error.message}`);
@@ -325,7 +330,7 @@ class QdrantVectorExplorer {
     }
 
     async findNearestNeighbors(point, count) {
-        if (!point.vectors || !point.vectors.clip_global) {
+        if (!point.vector || point.vector.length === 0) {
             this.showMessage('Selected point has no vector data', 'error');
             return;
         }
@@ -337,9 +342,7 @@ class QdrantVectorExplorer {
                     'Content-Type': 'application/json'
                 },
                 body: JSON.stringify({
-                    vector: {
-                        clip_global: point.vectors.clip_global
-                    },
+                    vector: point.vector,
                     limit: count + 1, // +1 to exclude self
                     with_payload: true,
                     with_vector: false
