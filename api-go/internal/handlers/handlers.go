@@ -261,15 +261,16 @@ func (h *Handlers) IngestImage(c *gin.Context) {
 		return
 	}
 
+	// Debug: Log embedding info
+	slog.Info("Got embedding", "length", len(embedding), "sample", embedding[:5])
+
 	// Generate image ID from key
 	imageID := ulid.Make().String()
 
 	// Create Qdrant point with integer ID
 	point := qdrant.Point{
 		ID: time.Now().UnixNano(),
-		Vectors: map[string]qdrant.Vector{
-			"clip_global": embedding,
-		},
+		Vector: embedding,
 		Payload: qdrant.Payload{
 			"image_id": imageID,
 			"bucket":   req.Bucket,
@@ -293,11 +294,18 @@ func (h *Handlers) IngestImage(c *gin.Context) {
 		},
 	}
 
+	// Debug: Log point info before upsert
+	slog.Info("About to upsert point", "id", point.ID, "vector_length", len(point.Vector))
+
 	// Store in Qdrant
 	if err := h.qdrant.UpsertPoint(ctx, point); err != nil {
+		slog.Error("Failed to upsert point", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to store in vector database"})
 		return
 	}
+
+	// Debug: Log successful upsert
+	slog.Info("Successfully upserted point", "id", point.ID)
 
 	// Update metrics
 	h.uploadCounter.Inc()
@@ -413,9 +421,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 				return
 			}
 
-			if vec, ok := point.Vectors["clip_global"]; ok {
-				embedding = vec
-			}
+			embedding = point.Vector
 		} else if req.TextQuery != "" {
 			// Get text embedding
 			embedding, err = h.getTextEmbedding(req.TextQuery)
@@ -656,50 +662,45 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 	// For each point, find its nearest neighbor and compute distance
 	var anomalies []gin.H
 
-	for _, point := range points {
-		if vec, ok := point.Vectors["clip_global"]; ok {
-			// Search for nearest neighbors excluding self
-			searchReq := qdrant.SearchRequest{
-				Vector: map[string]interface{}{
-					"name":   "clip_global",
-					"vector": vec,
-				},
-				Filter:      map[string]interface{}{}, // No user filtering for learning project
-				Limit:       2,                        // Self + 1 nearest
-				WithPayload: true,
-				WithVector:  false,
-			}
-
-			results, err := h.qdrant.Search(c.Request.Context(), searchReq)
-			if err != nil {
-				continue
-			}
-
-			// Find the nearest neighbor that isn't self
-			var nearestScore float32 = 1.0
-			for _, result := range results {
-				if fmt.Sprintf("%v", result.ID) != fmt.Sprintf("%v", point.ID) {
-					nearestScore = result.Score
-					break
-				}
-			}
-
-			// Lower scores indicate more anomalous images
-			anomalyScore := 1.0 - nearestScore
-
-			// Generate preview URL
-			var previewURL string
-			if key, ok := point.Payload["key"].(string); ok {
-				previewURL, _ = h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
-			}
-
-			anomalies = append(anomalies, gin.H{
-				"image_id":      fmt.Sprintf("%v", point.ID),
-				"anomaly_score": anomalyScore,
-				"payload":       point.Payload,
-				"preview_url":   previewURL,
-			})
+		for _, point := range points {
+		// Search for nearest neighbors excluding self
+		searchReq := qdrant.SearchRequest{
+			Vector:       point.Vector,
+			Filter:       map[string]interface{}{}, // No user filtering for learning project
+			Limit:        2,                        // Self + 1 nearest
+			WithPayload:  true,
+			WithVector:   false,
 		}
+
+		results, err := h.qdrant.Search(c.Request.Context(), searchReq)
+		if err != nil {
+			continue
+		}
+
+		// Find the nearest neighbor that isn't self
+		var nearestScore float32 = 1.0
+		for _, result := range results {
+			if fmt.Sprintf("%v", result.ID) != fmt.Sprintf("%v", point.ID) {
+				nearestScore = result.Score
+				break
+			}
+		}
+
+		// Lower scores indicate more anomalous images
+		anomalyScore := 1.0 - nearestScore
+
+		// Generate preview URL
+		var previewURL string
+		if key, ok := point.Payload["key"].(string); ok {
+			previewURL, _ = h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
+		}
+
+		anomalies = append(anomalies, gin.H{
+			"image_id":      fmt.Sprintf("%v", point.ID),
+			"anomaly_score": anomalyScore,
+			"payload":       point.Payload,
+			"preview_url":   previewURL,
+		})
 	}
 
 	// Sort by anomaly score (highest first)
@@ -877,7 +878,7 @@ func (h *Handlers) ReindexImage(c *gin.Context) {
 		return
 	}
 	// upsert vector
-	point := qdrant.Point{ID: p.ID, Vectors: map[string]qdrant.Vector{"clip_global": emb}, Payload: p.Payload}
+	point := qdrant.Point{ID: p.ID, Vector: emb, Payload: p.Payload}
 	if err := h.qdrant.UpsertPoint(c.Request.Context(), point); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upsert"})
 		return

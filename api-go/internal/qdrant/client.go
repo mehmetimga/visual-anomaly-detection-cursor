@@ -27,9 +27,9 @@ type Vector []float32
 type Payload map[string]interface{}
 
 type Point struct {
-	ID      interface{}       `json:"id"`
-	Vectors map[string]Vector `json:"vectors"`
-	Payload Payload           `json:"payload"`
+	ID      interface{} `json:"id"`
+	Vector  Vector      `json:"vector"`
+	Payload Payload     `json:"payload"`
 }
 
 type SearchRequest struct {
@@ -50,7 +50,7 @@ type SearchResult struct {
 }
 
 type CreateCollectionRequest struct {
-	Vectors map[string]VectorConfig `json:"vectors"`
+	Vectors VectorConfig `json:"vectors"`
 }
 
 type VectorConfig struct {
@@ -115,11 +115,9 @@ func (c *Client) EnsureCollection(ctx context.Context) error {
 
 	// Create collection
 	createReq := CreateCollectionRequest{
-		Vectors: map[string]VectorConfig{
-			"clip_global": {
-				Size:     VectorSize,
-				Distance: "Cosine",
-			},
+		Vectors: VectorConfig{
+			Size:     VectorSize,
+			Distance: "Cosine",
 		},
 	}
 
@@ -166,6 +164,10 @@ func (c *Client) UpsertPoint(ctx context.Context, point Point) error {
 		"points": []Point{point},
 	}
 
+	// Debug: Log the request being sent to Qdrant
+	reqJSON, _ := json.Marshal(req)
+	fmt.Printf("DEBUG: Sending to Qdrant: %s\n", string(reqJSON))
+
 	resp, err := c.doRequest(ctx, "PUT", fmt.Sprintf("/collections/%s/points", CollectionName), req)
 	if err != nil {
 		return err
@@ -173,8 +175,13 @@ func (c *Client) UpsertPoint(ctx context.Context, point Point) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to upsert point: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to upsert point: %s: %s", resp.Status, string(body))
 	}
+
+	// Debug: Log the response from Qdrant
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("DEBUG: Qdrant response: %s\n", string(body))
 
 	return nil
 }
