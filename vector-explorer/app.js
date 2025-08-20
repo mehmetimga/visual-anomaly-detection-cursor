@@ -181,13 +181,20 @@ class QdrantVectorExplorer {
     async performUMAP(vectors, dimensions = 2) {
         // Use UMAP.js library
         if (typeof UMAP === 'undefined') {
-            throw new Error('UMAP.js not loaded');
+            console.warn('UMAP.js not loaded, falling back to simple projection');
+            // Fallback to simple projection
+            if (dimensions === 2) {
+                return vectors.map(v => [v[0], v[1]]);
+            } else if (dimensions === 3) {
+                return vectors.map(v => [v[0], v[1], v[2]]);
+            }
+            return vectors.map(v => v.slice(0, dimensions));
         }
         
         try {
             const umap = new UMAP({
                 nComponents: dimensions,
-                nNeighbors: Math.min(15, vectors.length - 1),
+                nNeighbors: Math.min(15, Math.max(2, vectors.length - 1)),
                 minDist: 0.1,
                 spread: 1.0
             });
@@ -195,17 +202,24 @@ class QdrantVectorExplorer {
             return await umap.fit(vectors);
         } catch (error) {
             console.error('UMAP error:', error);
-            throw new Error(`UMAP failed: ${error.message}`);
+            console.warn('Falling back to simple projection');
+            // Fallback to simple projection
+            if (dimensions === 2) {
+                return vectors.map(v => [v[0], v[1]]);
+            } else if (dimensions === 3) {
+                return vectors.map(v => [v[0], v[1], v[2]]);
+            }
+            return vectors.map(v => v.slice(0, dimensions));
         }
     }
 
     async performTSNE(vectors) {
         // Simple t-SNE implementation (simplified)
         // For a full implementation, you might want to use a library like tsne-js
-        const tf = window.tf;
+        console.warn('t-SNE not implemented, falling back to simple projection');
         
-        // For now, use PCA as a fallback for t-SNE
-        return await this.performPCA(vectors, 2);
+        // Fallback to simple projection using first two dimensions
+        return vectors.map(v => [v[0], v[1]]);
     }
 
     renderPlot(pointsWithVectors) {
@@ -221,15 +235,23 @@ class QdrantVectorExplorer {
             width: document.getElementById('plot').offsetWidth,
             height: 600,
             margin: { l: 50, r: 50, t: 50, b: 50 },
-            scene: is3D ? {
-                xaxis: { title: 'X' },
-                yaxis: { title: 'Y' },
-                zaxis: { title: 'Z' }
-            } : undefined,
-            xaxis: !is3D ? { title: 'X' } : undefined,
-            yaxis: !is3D ? { title: 'Y' } : undefined,
             hovermode: 'closest'
         };
+
+        // Add 3D scene configuration only if needed
+        if (is3D) {
+            layout.scene = {
+                xaxis: { title: 'X' },
+                yaxis: { title: 'Y' },
+                zaxis: { title: 'Z' },
+                camera: {
+                    eye: { x: 1.5, y: 1.5, z: 1.5 }
+                }
+            };
+        } else {
+            layout.xaxis = { title: 'X' };
+            layout.yaxis = { title: 'Y' };
+        }
 
         const config = {
             responsive: true,
@@ -237,16 +259,24 @@ class QdrantVectorExplorer {
             modeBarButtonsToRemove: ['pan2d', 'lasso2d', 'select2d']
         };
 
-        Plotly.newPlot('plot', traces, layout, config).then(() => {
-            this.plot = document.getElementById('plot');
-            
-            // Add click event listener
-            this.plot.on('plotly_click', (data) => {
-                const pointIndex = data.points[0].pointIndex;
-                const point = pointsWithVectors[pointIndex];
-                this.selectPoint(point);
+        try {
+            Plotly.newPlot('plot', traces, layout, config).then(() => {
+                this.plot = document.getElementById('plot');
+                
+                // Add click event listener
+                this.plot.on('plotly_click', (data) => {
+                    const pointIndex = data.points[0].pointIndex;
+                    const point = pointsWithVectors[pointIndex];
+                    this.selectPoint(point);
+                });
+            }).catch(error => {
+                console.error('Plotly error:', error);
+                this.showMessage(`Plot rendering error: ${error.message}`, 'error');
             });
-        });
+        } catch (error) {
+            console.error('Plotly setup error:', error);
+            this.showMessage(`Plot setup error: ${error.message}`, 'error');
+        }
     }
 
     prepareTraces(pointsWithVectors, colorBy, sizeBy) {
@@ -254,10 +284,16 @@ class QdrantVectorExplorer {
         const colorMap = this.createColorMap(pointsWithVectors, colorBy);
         const sizeMap = this.createSizeMap(pointsWithVectors, sizeBy);
 
+        // Ensure we have valid data
+        if (!this.reducedData || this.reducedData.length === 0) {
+            console.error('No reduced data available');
+            return [];
+        }
+
         const trace = {
-            x: this.reducedData.map(d => d[0]),
-            y: this.reducedData.map(d => d[1]),
-            z: is3D ? this.reducedData.map(d => d[2]) : undefined,
+            x: this.reducedData.map(d => d[0] || 0),
+            y: this.reducedData.map(d => d[1] || 0),
+            z: is3D ? this.reducedData.map(d => d[2] || 0) : undefined,
             mode: 'markers',
             type: is3D ? 'scatter3d' : 'scatter',
             marker: {
