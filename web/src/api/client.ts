@@ -15,7 +15,7 @@ apiClient.interceptors.request.use(
   (config) => {
     const token = localStorage.getItem('token')
     if (token) {
-      config.headers.Authorization = `Bearer ${token}`
+      ;(config.headers as any).Authorization = `Bearer ${token}`
     }
     return config
   },
@@ -42,7 +42,7 @@ export const authApi = {
     const { data } = await apiClient.post('/auth/login', { email, password })
     return data
   },
-  
+
   register: async (email: string, password: string) => {
     const { data } = await apiClient.post('/auth/register', { email, password })
     return data
@@ -55,14 +55,34 @@ export const imagesApi = {
     const { data } = await apiClient.post('/images/presign', { file_name: fileName })
     return data
   },
-  
+
   ingest: async (bucket: string, key: string, tags?: string[]) => {
     const { data } = await apiClient.post('/images/ingest', { bucket, key, tags })
     return data
   },
-  
+
   getImage: async (id: string) => {
     const { data } = await apiClient.get(`/images/${id}`)
+    return data
+  },
+
+  listImages: async (limit = 50) => {
+    const { data } = await apiClient.get(`/images`, { params: { limit } })
+    return data as { images: Array<{ image_id: string; payload: any; preview_url?: string }>; count: number }
+  },
+
+  deleteImage: async (id: string) => {
+    const { data } = await apiClient.delete(`/images/${id}`)
+    return data
+  },
+
+  reindexImage: async (id: string) => {
+    const { data } = await apiClient.post(`/images/${id}/reindex`)
+    return data
+  },
+
+  regenerateThumbnail: async (id: string) => {
+    const { data } = await apiClient.post(`/images/${id}/thumbnail`)
     return data
   },
 }
@@ -80,7 +100,7 @@ export const searchApi = {
     const { data } = await apiClient.post('/search/similar', params)
     return data
   },
-  
+
   searchByImage: async (file: File, params?: {
     limit?: number
     score_threshold?: number
@@ -88,11 +108,11 @@ export const searchApi = {
   }) => {
     const formData = new FormData()
     formData.append('image', file)
-    
+
     if (params?.limit) formData.append('limit', params.limit.toString())
     if (params?.score_threshold) formData.append('score_threshold', params.score_threshold.toString())
     if (params?.filter) formData.append('filter', JSON.stringify(params.filter))
-    
+
     const { data } = await apiClient.post('/search/similar', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
@@ -100,7 +120,7 @@ export const searchApi = {
     })
     return data
   },
-  
+
   cluster: async (params: {
     image_ids?: string[]
     filter?: Record<string, any>
@@ -110,6 +130,11 @@ export const searchApi = {
     const { data } = await apiClient.post('/search/cluster', params)
     return data
   },
+
+  deduplicate: async (params?: { limit?: number; score_threshold?: number }) => {
+    const { data } = await apiClient.post('/deduplicate', params || {})
+    return data as { clusters: Array<{ images: Array<{ image_id: string; preview_url?: string; score?: number }> }>; count: number }
+  },
 }
 
 // QA API
@@ -118,7 +143,7 @@ export const qaApi = {
     const { data } = await apiClient.get('/qa/anomalies')
     return data
   },
-  
+
   submitFeedback: async (imageId: string, action: string, note?: string) => {
     const { data } = await apiClient.post('/feedback', {
       image_id: imageId,

@@ -7,12 +7,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	_ "image/jpeg"
+	"image/jpeg"
+	_ "image/jpeg" // decode
 	_ "image/png"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/corona10/goimagehash"
@@ -71,7 +75,7 @@ func New(storage *storage.MinioClient, qdrant *qdrant.Client, auth *auth.Service
 		auth:          auth,
 		embedURL:      embedURL,
 		db:            db,
-		httpClient:    &http.Client{Timeout: 30 * time.Second},
+		httpClient:    &http.Client{Timeout: 120 * time.Second},
 		uploadCounter: uploadCounter,
 		searchHist:    searchHist,
 	}
@@ -438,7 +442,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 			// Generate preview URL
 			if key, ok := result.Payload["key"].(string); ok {
 				previewURL, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
-				item["preview_url"] = previewURL
+				item["preview_url"] = toS3ProxyURL(previewURL)
 			}
 
 			response = append(response, item)
@@ -481,7 +485,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 			// Generate preview URL
 			if key, ok := result.Payload["key"].(string); ok {
 				previewURL, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
-				item["preview_url"] = previewURL
+				item["preview_url"] = toS3ProxyURL(previewURL)
 			}
 
 			response = append(response, item)
@@ -497,6 +501,49 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 func (h *Handlers) ClusterImages(c *gin.Context) {
 	// TODO: Implement clustering logic
 	c.JSON(http.StatusNotImplemented, gin.H{"error": "clustering not yet implemented"})
+}
+
+func (h *Handlers) ListImages(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	// Parse optional limit
+	limit := 50
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+
+	filter := map[string]interface{}{
+		"owner_user_id": userID,
+	}
+
+	points, err := h.qdrant.ScrollPoints(c.Request.Context(), filter, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch images"})
+		return
+	}
+
+	response := make([]gin.H, 0, len(points))
+	for _, p := range points {
+		var previewURL string
+		if key, ok := p.Payload["key"].(string); ok {
+			urlStr, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 3600*time.Second)
+			previewURL = toS3ProxyURL(urlStr)
+		}
+
+		item := gin.H{
+			"image_id":    p.ID,
+			"payload":     p.Payload,
+			"preview_url": previewURL,
+		}
+		response = append(response, item)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"images": response,
+		"count":  len(response),
+	})
 }
 
 func (h *Handlers) GetImage(c *gin.Context) {
@@ -518,7 +565,8 @@ func (h *Handlers) GetImage(c *gin.Context) {
 	// Generate preview URL
 	var previewURL string
 	if key, ok := point.Payload["key"].(string); ok {
-		previewURL, _ = h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
+		urlStr, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
+		previewURL = toS3ProxyURL(urlStr)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -633,6 +681,236 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 	})
 }
 
+func (h *Handlers) Deduplicate(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Limit          int      `json:"limit"`
+		ScoreThreshold *float32 `json:"score_threshold"`
+	}
+	_ = c.ShouldBindJSON(&req)
+	if req.Limit == 0 {
+		req.Limit = 200
+	}
+	if req.ScoreThreshold == nil {
+		// higher means stricter similarity (cosine)
+		thr := float32(0.85)
+		req.ScoreThreshold = &thr
+	}
+
+	// fetch user's points
+	points, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{"owner_user_id": userID}, req.Limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch points"})
+		return
+	}
+	if len(points) == 0 {
+		c.JSON(http.StatusOK, gin.H{"clusters": []any{}, "count": 0})
+		return
+	}
+
+	// compute simple pHash groups to reduce pair comparisons
+	type item struct {
+		id    interface{}
+		key   string
+		phash string
+		url   string
+	}
+	n := make([]item, 0, len(points))
+	for _, p := range points {
+		var previewURL string
+		if k, ok := p.Payload["key"].(string); ok {
+			u, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), k, 3600*time.Second)
+			previewURL = toS3ProxyURL(u)
+		}
+		ph := ""
+		if v, ok := p.Payload["phash"].(string); ok {
+			ph = v
+		}
+		k := ""
+		if v, ok := p.Payload["key"].(string); ok {
+			k = v
+		}
+		n = append(n, item{id: p.ID, key: k, phash: ph, url: previewURL})
+	}
+
+	// group by first 8 chars of phash as a coarse bucket
+	buckets := map[string][]item{}
+	for _, it := range n {
+		prefix := it.phash
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		buckets[prefix] = append(buckets[prefix], it)
+	}
+
+	clusters := []gin.H{}
+	visited := map[interface{}]bool{}
+
+	for _, bucket := range buckets {
+		for i := 0; i < len(bucket); i++ {
+			if visited[bucket[i].id] {
+				continue
+			}
+			seed := bucket[i]
+			visited[seed.id] = true
+			cluster := []gin.H{{
+				"image_id":    seed.id,
+				"preview_url": seed.url,
+			}}
+
+			// query nearest neighbors by seed id within owner filter
+			filter := map[string]interface{}{"owner_user_id": userID}
+			neighbors, err := h.qdrant.SearchByPoint(c.Request.Context(), "clip_global", seed.id, 10, filter, req.ScoreThreshold)
+			if err == nil {
+				for _, nb := range neighbors {
+					if nb.ID == seed.id {
+						continue
+					}
+					// add to cluster
+					visited[nb.ID] = true
+					preview := ""
+					if k, ok := nb.Payload["key"].(string); ok {
+						u, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), k, 3600*time.Second)
+						preview = toS3ProxyURL(u)
+					}
+					cluster = append(cluster, gin.H{"image_id": nb.ID, "preview_url": preview, "score": nb.Score})
+				}
+			}
+
+			if len(cluster) > 1 {
+				clusters = append(clusters, gin.H{"images": cluster})
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"clusters": clusters, "count": len(clusters)})
+}
+
+func (h *Handlers) DeleteImage(c *gin.Context) {
+	imageID := c.Param("id")
+	userID := c.GetString("user_id")
+
+	pts, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{
+		"owner_user_id": userID,
+		"image_id":      imageID,
+	}, 1)
+	if err != nil || len(pts) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
+		return
+	}
+	p := pts[0]
+
+	// remove object in storage
+	if key, ok := p.Payload["key"].(string); ok && key != "" {
+		_ = h.storage.DeleteFile(c.Request.Context(), key)
+	}
+	// delete qdrant point
+	if err := h.qdrant.DeletePoint(c.Request.Context(), p.ID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+func (h *Handlers) ReindexImage(c *gin.Context) {
+	imageID := c.Param("id")
+	userID := c.GetString("user_id")
+
+	pts, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{
+		"owner_user_id": userID,
+		"image_id":      imageID,
+	}, 1)
+	if err != nil || len(pts) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
+		return
+	}
+	p := pts[0]
+	key, _ := p.Payload["key"].(string)
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing key"})
+		return
+	}
+	// download and re-embed
+	data, err := h.storage.DownloadFile(c.Request.Context(), key)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image not found in storage"})
+		return
+	}
+	emb, err := h.getImageEmbedding(data)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to get embedding"})
+		return
+	}
+	// upsert vector
+	point := qdrant.Point{ID: p.ID, Vectors: map[string]qdrant.Vector{"clip_global": emb}, Payload: p.Payload}
+	if err := h.qdrant.UpsertPoint(c.Request.Context(), point); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to upsert"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "reindexed"})
+}
+
+func (h *Handlers) RegenerateThumbnail(c *gin.Context) {
+	imageID := c.Param("id")
+	userID := c.GetString("user_id")
+
+	pts, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{
+		"owner_user_id": userID,
+		"image_id":      imageID,
+	}, 1)
+	if err != nil || len(pts) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
+		return
+	}
+	p := pts[0]
+	key, _ := p.Payload["key"].(string)
+	if key == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "missing key"})
+		return
+	}
+	data, err := h.storage.DownloadFile(c.Request.Context(), key)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "image not found in storage"})
+		return
+	}
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid image"})
+		return
+	}
+	// simple thumbnail: scale to fit 256x256 and encode JPEG
+	bounds := img.Bounds()
+	imageWidth, imageHeight := bounds.Dx(), bounds.Dy()
+	max := 256
+	ratio := float64(imageWidth) / float64(imageHeight)
+	var tw, th int
+	if ratio > 1 {
+		tw, th = max, int(float64(max)/ratio)
+	} else {
+		tw, th = int(float64(max)*ratio), max
+	}
+	thumb := image.NewRGBA(image.Rect(0, 0, tw, th))
+	for y := 0; y < th; y++ {
+		for x := 0; x < tw; x++ {
+			sx := x * imageWidth / tw
+			sy := y * imageHeight / th
+			thumb.Set(x, y, img.At(sx, sy))
+		}
+	}
+	buf := new(bytes.Buffer)
+	if err := jpeg.Encode(buf, thumb, &jpeg.Options{Quality: 85}); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "encode thumbnail failed"})
+		return
+	}
+	thumbKey := storage.GenerateThumbnailKey(userID, imageID)
+	if err := h.storage.UploadFile(c.Request.Context(), thumbKey, buf.Bytes(), "image/jpeg"); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "upload thumbnail failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "thumbnail_regenerated", "thumbnail_key": thumbKey})
+}
+
 // Helper functions
 
 func (h *Handlers) getImageEmbedding(imageData []byte) ([]float32, error) {
@@ -734,4 +1012,15 @@ func getEnv(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
+}
+
+func toS3ProxyURL(raw string) string {
+	endpoint := getEnv("S3_ENDPOINT", "http://minio:9000")
+	eu, err := url.Parse(endpoint)
+	if err != nil || eu.Scheme == "" || eu.Host == "" {
+		// best effort fallback
+		return strings.Replace(raw, "http://minio:9000", "/s3", 1)
+	}
+	prefix := eu.Scheme + "://" + eu.Host
+	return strings.Replace(raw, prefix, "/s3", 1)
 }

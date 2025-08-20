@@ -56,6 +56,16 @@ type VectorConfig struct {
 	Distance string `json:"distance"`
 }
 
+type SearchByPointRequest struct {
+	Vector         map[string]interface{} `json:"vector"`
+	VectorName     string                 `json:"using,omitempty"`
+	Filter         map[string]interface{} `json:"filter,omitempty"`
+	Limit          int                    `json:"limit"`
+	WithPayload    bool                   `json:"with_payload"`
+	WithVector     bool                   `json:"with_vector"`
+	ScoreThreshold *float32               `json:"score_threshold,omitempty"`
+}
+
 func NewClient(baseURL, apiKey string) (*Client, error) {
 	return &Client{
 		baseURL: baseURL,
@@ -188,6 +198,36 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult,
 	return result.Result, nil
 }
 
+func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID interface{}, limit int, filter map[string]interface{}, scoreThreshold *float32) ([]SearchResult, error) {
+	req := SearchByPointRequest{
+		Vector:         map[string]interface{}{"id": pointID},
+		VectorName:     vectorName,
+		Filter:         filter,
+		Limit:          limit,
+		WithPayload:    true,
+		WithVector:     false,
+		ScoreThreshold: scoreThreshold,
+	}
+
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/search", CollectionName), req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("search failed: %s", resp.Status)
+	}
+
+	var result struct {
+		Result []SearchResult `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Result, nil
+}
+
 func (c *Client) GetPoint(ctx context.Context, id string) (*Point, error) {
 	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/collections/%s/points/%s", CollectionName, id), nil)
 	if err != nil {
@@ -214,8 +254,23 @@ func (c *Client) GetPoint(ctx context.Context, id string) (*Point, error) {
 }
 
 func (c *Client) ScrollPoints(ctx context.Context, filter map[string]interface{}, limit int) ([]Point, error) {
+	// Translate simple equality filter map into Qdrant filter structure
+	var qFilter map[string]interface{}
+	if len(filter) > 0 {
+		must := make([]map[string]interface{}, 0, len(filter))
+		for k, v := range filter {
+			must = append(must, map[string]interface{}{
+				"key": k,
+				"match": map[string]interface{}{
+					"value": v,
+				},
+			})
+		}
+		qFilter = map[string]interface{}{"must": must}
+	}
+
 	req := map[string]interface{}{
-		"filter":       filter,
+		"filter":       qFilter,
 		"limit":        limit,
 		"with_payload": true,
 		"with_vector":  false,
@@ -241,4 +296,19 @@ func (c *Client) ScrollPoints(ctx context.Context, filter map[string]interface{}
 	}
 
 	return result.Result.Points, nil
+}
+
+func (c *Client) DeletePoint(ctx context.Context, id interface{}) error {
+	req := map[string]interface{}{
+		"points": []interface{}{id},
+	}
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/delete", CollectionName), req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to delete point: %s", resp.Status)
+	}
+	return nil
 }

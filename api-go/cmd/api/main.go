@@ -105,9 +105,12 @@ func main() {
 			// Search & discovery
 			protected.POST("/search/similar", h.SearchSimilar)
 			protected.POST("/search/cluster", h.ClusterImages)
-			protected.GET("/images/:id", h.GetImage)
+			protected.POST("/deduplicate", h.Deduplicate)
 
-			// Feedback & QA
+			protected.DELETE("/images/:id", h.DeleteImage)
+			protected.POST("/images/:id/reindex", h.ReindexImage)
+			protected.POST("/images/:id/thumbnail", h.RegenerateThumbnail)
+
 			protected.POST("/feedback", h.SubmitFeedback)
 			protected.GET("/qa/anomalies", h.GetAnomalies)
 		}
