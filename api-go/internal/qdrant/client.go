@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -225,7 +226,7 @@ func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID i
 	filterWrapped := buildQdrantFilter(filter)
 	req := SearchByPointRequest{
 		Vector:         map[string]interface{}{"id": pointID},
-		VectorName:     vectorName,
+		VectorName:     vectorName, // This maps to "using" in JSON
 		Filter:         filterWrapped,
 		Limit:          limit,
 		WithPayload:    true,
@@ -254,7 +255,22 @@ func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID i
 }
 
 func (c *Client) GetPoint(ctx context.Context, id string) (*Point, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("/collections/%s/points/%s", CollectionName, id), nil)
+	// Convert string ID to numeric ID if needed
+	var numericID interface{}
+	if idInt, err := strconv.ParseInt(id, 10, 64); err == nil {
+		numericID = idInt
+	} else {
+		numericID = id
+	}
+
+	// Get all points and find the one we need (simpler approach)
+	req := map[string]interface{}{
+		"limit":        100, // Get more points to ensure we find the one we need
+		"with_payload": true,
+		"with_vector":  true,
+	}
+
+	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/scroll", CollectionName), req)
 	if err != nil {
 		return nil, err
 	}
@@ -269,13 +285,22 @@ func (c *Client) GetPoint(ctx context.Context, id string) (*Point, error) {
 	}
 
 	var result struct {
-		Result Point `json:"result"`
+		Result struct {
+			Points []Point `json:"points"`
+		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
 
-	return &result.Result, nil
+	// Find the point with matching ID
+	for _, point := range result.Result.Points {
+		if fmt.Sprintf("%v", point.ID) == fmt.Sprintf("%v", numericID) {
+			return &point, nil
+		}
+	}
+
+	return nil, nil
 }
 
 func (c *Client) ScrollPoints(ctx context.Context, filter map[string]interface{}, limit int) ([]Point, error) {

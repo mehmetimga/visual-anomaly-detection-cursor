@@ -382,8 +382,32 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 
 		// Get embedding based on input type
 		if req.ImageID != "" {
+			// Convert string ID back to numeric ID for Qdrant lookup
+			var numericID interface{}
+			// Try to parse as int64 first (for scientific notation)
+			if strings.Contains(req.ImageID, "e+") {
+				if idFloat, err := strconv.ParseFloat(req.ImageID, 64); err == nil {
+					// Convert to string to preserve precision, then parse as int64
+					idStr := fmt.Sprintf("%.0f", idFloat)
+					if idInt, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+						numericID = idInt
+					} else {
+						numericID = req.ImageID
+					}
+				} else {
+					numericID = req.ImageID
+				}
+			} else {
+				// Try as regular int64
+				if idInt, err := strconv.ParseInt(req.ImageID, 10, 64); err == nil {
+					numericID = idInt
+				} else {
+					numericID = req.ImageID
+				}
+			}
+
 			// Fetch existing image vector
-			point, err := h.qdrant.GetPoint(c.Request.Context(), req.ImageID)
+			point, err := h.qdrant.GetPoint(c.Request.Context(), fmt.Sprintf("%v", numericID))
 			if err != nil || point == nil {
 				c.JSON(http.StatusNotFound, gin.H{"error": "image not found"})
 				return
@@ -617,17 +641,13 @@ func (h *Handlers) SubmitFeedback(c *gin.Context) {
 }
 
 func (h *Handlers) GetAnomalies(c *gin.Context) {
-	userID := c.GetString("user_id")
+	// userID := c.GetString("user_id") // Not used for learning project
 
 	// For MVP, return images with lowest similarity scores to their nearest neighbors
 	// This is a simple anomaly detection approach
 
-	// Get all user's images
-	filter := map[string]interface{}{
-		"owner_user_id": userID,
-	}
-
-	points, err := h.qdrant.ScrollPoints(c.Request.Context(), filter, 100)
+	// Get all images (no user filtering for learning project)
+	points, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{}, 100)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch images"})
 		return
@@ -644,8 +664,8 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 					"name":   "clip_global",
 					"vector": vec,
 				},
-				Filter:      filter,
-				Limit:       2, // Self + 1 nearest
+				Filter:      map[string]interface{}{}, // No user filtering for learning project
+				Limit:       2,                        // Self + 1 nearest
 				WithPayload: true,
 				WithVector:  false,
 			}
@@ -704,7 +724,7 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 	}
 	if req.ScoreThreshold == nil {
 		// higher means stricter similarity (cosine)
-		thr := float32(0.85)
+		thr := float32(0.6) // Lowered from 0.85 to 0.6 for learning project
 		req.ScoreThreshold = &thr
 	}
 
@@ -748,6 +768,10 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 	buckets := map[string][]item{}
 	for _, it := range n {
 		prefix := it.phash
+		// Extract the actual hash part (remove "p:" prefix if present)
+		if strings.HasPrefix(prefix, "p:") {
+			prefix = prefix[2:] // Remove "p:" prefix
+		}
 		if len(prefix) > 8 {
 			prefix = prefix[:8]
 		}
