@@ -11,6 +11,7 @@ export function DeduplicatePage() {
 
   const handleDelete = async (id: string) => {
     try {
+      if (!window.confirm('Delete this image permanently?')) return
       await imagesApi.deleteImage(id)
       toast({ title: 'Deleted' })
       refetch()
@@ -35,6 +36,15 @@ export function DeduplicatePage() {
     } catch (e: any) {
       toast({ title: 'Thumbnail failed', description: e.message, variant: 'destructive' })
     }
+  }
+
+  const handleMergeCluster = (images: any[]) => {
+    // TODO: backend merge; for now just toast
+    toast({ title: 'Merged', description: `${images.length} images marked merged (placeholder)` })
+  }
+
+  const handleKeepAll = (images: any[]) => {
+    toast({ title: 'Kept all', description: `${images.length} images kept (placeholder)` })
   }
 
   if (isLoading) {
@@ -79,8 +89,8 @@ export function DeduplicatePage() {
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-sm font-semibold">Cluster {idx + 1} - {cluster.images.length} images</h3>
                   <div className="flex gap-2">
-                    <Button size="sm" variant="outline"><Copy className="h-4 w-4 mr-1" />Merge</Button>
-                    <Button size="sm" variant="outline">Keep All</Button>
+                    <Button size="sm" variant="outline" onClick={() => handleMergeCluster(cluster.images)}><Copy className="h-4 w-4 mr-1" />Merge</Button>
+                    <Button size="sm" variant="outline" onClick={() => handleKeepAll(cluster.images)}>Keep All</Button>
                   </div>
                 </div>
                 <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">

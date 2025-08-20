@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 )
@@ -31,8 +32,8 @@ type Point struct {
 }
 
 type SearchRequest struct {
-	Vector      []float32              `json:"vector"`
-	VectorName  string                 `json:"vector_name,omitempty"`
+	Vector      interface{}            `json:"vector"` // Can be []float32 or map[string]interface{} for named vectors
+	Using       string                 `json:"using,omitempty"`
 	Filter      map[string]interface{} `json:"filter,omitempty"`
 	Limit       int                    `json:"limit"`
 	WithPayload bool                   `json:"with_payload"`
@@ -41,10 +42,10 @@ type SearchRequest struct {
 }
 
 type SearchResult struct {
-	ID      string  `json:"id"`
-	Score   float32 `json:"score"`
-	Payload Payload `json:"payload,omitempty"`
-	Vector  Vector  `json:"vector,omitempty"`
+	ID      interface{} `json:"id"` // Can be string or number
+	Score   float32     `json:"score"`
+	Payload Payload     `json:"payload,omitempty"`
+	Vector  Vector      `json:"vector,omitempty"`
 }
 
 type CreateCollectionRequest struct {
@@ -177,7 +178,29 @@ func (c *Client) UpsertPoint(ctx context.Context, point Point) error {
 	return nil
 }
 
+// buildQdrantFilter converts simple key-value filters to Qdrant's must/match format
+func buildQdrantFilter(simple map[string]interface{}) map[string]interface{} {
+	if len(simple) == 0 {
+		return nil
+	}
+	must := make([]map[string]interface{}, 0, len(simple))
+	for k, v := range simple {
+		must = append(must, map[string]interface{}{
+			"key": k,
+			"match": map[string]interface{}{
+				"value": v,
+			},
+		})
+	}
+	return map[string]interface{}{"must": must}
+}
+
 func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult, error) {
+	// wrap simple filter into Qdrant format
+	if req.Filter != nil {
+		req.Filter = buildQdrantFilter(req.Filter)
+	}
+
 	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/search", CollectionName), req)
 	if err != nil {
 		return nil, err
@@ -185,7 +208,8 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult,
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("search failed: %s: %s", resp.Status, string(body))
 	}
 
 	var result struct {
@@ -194,15 +218,15 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult,
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, err
 	}
-
 	return result.Result, nil
 }
 
 func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID interface{}, limit int, filter map[string]interface{}, scoreThreshold *float32) ([]SearchResult, error) {
+	filterWrapped := buildQdrantFilter(filter)
 	req := SearchByPointRequest{
 		Vector:         map[string]interface{}{"id": pointID},
 		VectorName:     vectorName,
-		Filter:         filter,
+		Filter:         filterWrapped,
 		Limit:          limit,
 		WithPayload:    true,
 		WithVector:     false,
@@ -216,7 +240,8 @@ func (c *Client) SearchByPoint(ctx context.Context, vectorName string, pointID i
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("search failed: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("search failed: %s: %s", resp.Status, string(body))
 	}
 
 	var result struct {

@@ -326,7 +326,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 	timer := prometheus.NewTimer(h.searchHist)
 	defer timer.ObserveDuration()
 
-	userID := c.GetString("user_id")
+	// userID := c.GetString("user_id") // Not used for learning project
 
 	// Parse multipart form
 	contentType := c.GetHeader("Content-Type")
@@ -404,16 +404,18 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 			return
 		}
 
-		// Add owner filter
-		if req.Filter == nil {
-			req.Filter = make(map[string]interface{})
-		}
-		req.Filter["owner_user_id"] = userID
+		// No user filtering for learning project
+		// if req.Filter == nil {
+		// 	req.Filter = make(map[string]interface{})
+		// }
+		// req.Filter["owner_user_id"] = userID
 
 		// Perform search
 		searchReq := qdrant.SearchRequest{
-			Vector:      embedding,
-			VectorName:  "clip_global",
+			Vector: map[string]interface{}{
+				"name":   "clip_global",
+				"vector": embedding,
+			},
 			Filter:      req.Filter,
 			Limit:       req.Limit,
 			WithPayload: req.IncludePayload,
@@ -423,6 +425,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 
 		results, err := h.qdrant.Search(c.Request.Context(), searchReq)
 		if err != nil {
+			slog.Error("Search failed", "error", err.Error(), "req", searchReq)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 			return
 		}
@@ -430,8 +433,10 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 		// Add preview URLs
 		var response []gin.H
 		for _, result := range results {
+			// Ensure ID is always a string
+			idStr := fmt.Sprintf("%v", result.ID)
 			item := gin.H{
-				"image_id": result.ID,
+				"image_id": idStr,
 				"score":    result.Score,
 			}
 
@@ -459,9 +464,11 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 	if embedding != nil {
 		// Default search parameters for multipart
 		searchReq := qdrant.SearchRequest{
-			Vector:      embedding,
-			VectorName:  "clip_global",
-			Filter:      map[string]interface{}{"owner_user_id": userID},
+			Vector: map[string]interface{}{
+				"name":   "clip_global",
+				"vector": embedding,
+			},
+			Filter:      nil, // No user filtering for learning project
 			Limit:       10,
 			WithPayload: true,
 			WithVector:  false,
@@ -469,6 +476,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 
 		results, err := h.qdrant.Search(c.Request.Context(), searchReq)
 		if err != nil {
+			slog.Error("Search failed", "error", err.Error(), "req", searchReq)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "search failed"})
 			return
 		}
@@ -477,7 +485,7 @@ func (h *Handlers) SearchSimilar(c *gin.Context) {
 		var response []gin.H
 		for _, result := range results {
 			item := gin.H{
-				"image_id": result.ID,
+				"image_id": fmt.Sprintf("%v", result.ID),
 				"score":    result.Score,
 				"payload":  result.Payload,
 			}
@@ -504,7 +512,7 @@ func (h *Handlers) ClusterImages(c *gin.Context) {
 }
 
 func (h *Handlers) ListImages(c *gin.Context) {
-	userID := c.GetString("user_id")
+	// userID := c.GetString("user_id") // Not used for learning project
 
 	// Parse optional limit
 	limit := 50
@@ -515,7 +523,7 @@ func (h *Handlers) ListImages(c *gin.Context) {
 	}
 
 	filter := map[string]interface{}{
-		"owner_user_id": userID,
+		// No user filtering for learning project
 	}
 
 	points, err := h.qdrant.ScrollPoints(c.Request.Context(), filter, limit)
@@ -533,7 +541,7 @@ func (h *Handlers) ListImages(c *gin.Context) {
 		}
 
 		item := gin.H{
-			"image_id":    p.ID,
+			"image_id":    fmt.Sprintf("%v", p.ID),
 			"payload":     p.Payload,
 			"preview_url": previewURL,
 		}
@@ -632,8 +640,10 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 		if vec, ok := point.Vectors["clip_global"]; ok {
 			// Search for nearest neighbors excluding self
 			searchReq := qdrant.SearchRequest{
-				Vector:      vec,
-				VectorName:  "clip_global",
+				Vector: map[string]interface{}{
+					"name":   "clip_global",
+					"vector": vec,
+				},
 				Filter:      filter,
 				Limit:       2, // Self + 1 nearest
 				WithPayload: true,
@@ -648,7 +658,7 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 			// Find the nearest neighbor that isn't self
 			var nearestScore float32 = 1.0
 			for _, result := range results {
-				if result.ID != point.ID {
+				if fmt.Sprintf("%v", result.ID) != fmt.Sprintf("%v", point.ID) {
 					nearestScore = result.Score
 					break
 				}
@@ -664,7 +674,7 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 			}
 
 			anomalies = append(anomalies, gin.H{
-				"image_id":      point.ID,
+				"image_id":      fmt.Sprintf("%v", point.ID),
 				"anomaly_score": anomalyScore,
 				"payload":       point.Payload,
 				"preview_url":   previewURL,
@@ -682,7 +692,7 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 }
 
 func (h *Handlers) Deduplicate(c *gin.Context) {
-	userID := c.GetString("user_id")
+	// userID := c.GetString("user_id") // Not used for learning project
 
 	var req struct {
 		Limit          int      `json:"limit"`
@@ -698,8 +708,8 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 		req.ScoreThreshold = &thr
 	}
 
-	// fetch user's points
-	points, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{"owner_user_id": userID}, req.Limit)
+	// fetch all points (no user filtering for learning project)
+	points, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{}, req.Limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch points"})
 		return
@@ -755,12 +765,12 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 			seed := bucket[i]
 			visited[seed.id] = true
 			cluster := []gin.H{{
-				"image_id":    seed.id,
+				"image_id":    fmt.Sprintf("%v", seed.id),
 				"preview_url": seed.url,
 			}}
 
-			// query nearest neighbors by seed id within owner filter
-			filter := map[string]interface{}{"owner_user_id": userID}
+			// query nearest neighbors by seed id (no user filtering for learning project)
+			filter := map[string]interface{}{}
 			neighbors, err := h.qdrant.SearchByPoint(c.Request.Context(), "clip_global", seed.id, 10, filter, req.ScoreThreshold)
 			if err == nil {
 				for _, nb := range neighbors {
@@ -774,7 +784,7 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 						u, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), k, 3600*time.Second)
 						preview = toS3ProxyURL(u)
 					}
-					cluster = append(cluster, gin.H{"image_id": nb.ID, "preview_url": preview, "score": nb.Score})
+					cluster = append(cluster, gin.H{"image_id": fmt.Sprintf("%v", nb.ID), "preview_url": preview, "score": nb.Score})
 				}
 			}
 

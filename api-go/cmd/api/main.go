@@ -101,6 +101,7 @@ func main() {
 			// Upload & ingest
 			protected.POST("/images/presign", h.GetPresignedURL)
 			protected.POST("/images/ingest", h.IngestImage)
+			protected.GET("/images", h.ListImages)
 
 			// Search & discovery
 			protected.POST("/search/similar", h.SearchSimilar)
