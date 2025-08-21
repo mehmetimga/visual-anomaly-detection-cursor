@@ -58,16 +58,6 @@ type VectorConfig struct {
 	Distance string `json:"distance"`
 }
 
-type SearchByPointRequest struct {
-	Vector         map[string]interface{} `json:"vector"`
-	VectorName     string                 `json:"using,omitempty"`
-	Filter         map[string]interface{} `json:"filter,omitempty"`
-	Limit          int                    `json:"limit"`
-	WithPayload    bool                   `json:"with_payload"`
-	WithVector     bool                   `json:"with_vector"`
-	ScoreThreshold *float32               `json:"score_threshold,omitempty"`
-}
-
 func NewClient(baseURL, apiKey string) (*Client, error) {
 	return &Client{
 		baseURL: baseURL,
@@ -230,14 +220,27 @@ func (c *Client) Search(ctx context.Context, req SearchRequest) ([]SearchResult,
 }
 
 func (c *Client) SearchByPoint(ctx context.Context, pointID interface{}, limit int, filter map[string]interface{}, scoreThreshold *float32) ([]SearchResult, error) {
+	// First, get the point to extract its vector
+	point, err := c.GetPoint(ctx, fmt.Sprintf("%v", pointID))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get point: %w", err)
+	}
+	if point == nil {
+		return nil, fmt.Errorf("point not found: %v", pointID)
+	}
+	if len(point.Vector) == 0 {
+		return nil, fmt.Errorf("point has no vector: %v", pointID)
+	}
+
+	// Now search using the point's vector
 	filterWrapped := buildQdrantFilter(filter)
-	req := SearchByPointRequest{
-		Vector:         map[string]interface{}{"id": pointID},
-		Filter:         filterWrapped,
-		Limit:          limit,
-		WithPayload:    true,
-		WithVector:     false,
-		ScoreThreshold: scoreThreshold,
+	req := SearchRequest{
+		Vector:      point.Vector,
+		Filter:      filterWrapped,
+		Limit:       limit,
+		WithPayload: true,
+		WithVector:  false,
+		Threshold:   scoreThreshold,
 	}
 
 	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/search", CollectionName), req)
@@ -310,6 +313,10 @@ func (c *Client) GetPoint(ctx context.Context, id string) (*Point, error) {
 }
 
 func (c *Client) ScrollPoints(ctx context.Context, filter map[string]interface{}, limit int) ([]Point, error) {
+	return c.ScrollPointsWithVector(ctx, filter, limit, false)
+}
+
+func (c *Client) ScrollPointsWithVector(ctx context.Context, filter map[string]interface{}, limit int, withVector bool) ([]Point, error) {
 	// Translate simple equality filter map into Qdrant filter structure
 	var qFilter map[string]interface{}
 	if len(filter) > 0 {
@@ -329,7 +336,7 @@ func (c *Client) ScrollPoints(ctx context.Context, filter map[string]interface{}
 		"filter":       qFilter,
 		"limit":        limit,
 		"with_payload": true,
-		"with_vector":  false,
+		"with_vector":  withVector,
 	}
 
 	resp, err := c.doRequest(ctx, "POST", fmt.Sprintf("/collections/%s/points/scroll", CollectionName), req)

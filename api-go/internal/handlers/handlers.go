@@ -641,17 +641,22 @@ func (h *Handlers) SubmitFeedback(c *gin.Context) {
 }
 
 func (h *Handlers) GetAnomalies(c *gin.Context) {
+	fmt.Println("=== GetAnomalies FUNCTION CALLED ===")
+	slog.Info("GetAnomalies: function called")
+
 	// userID := c.GetString("user_id") // Not used for learning project
 
 	// For MVP, return images with lowest similarity scores to their nearest neighbors
 	// This is a simple anomaly detection approach
 
 	// Get all images (no user filtering for learning project)
-	points, err := h.qdrant.ScrollPoints(c.Request.Context(), map[string]interface{}{}, 100)
+	points, err := h.qdrant.ScrollPointsWithVector(c.Request.Context(), map[string]interface{}{}, 100, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch images"})
 		return
 	}
+
+	slog.Info("GetAnomalies: fetched points", "count", len(points))
 
 	// For each point, find its nearest neighbor and compute distance
 	var anomalies []gin.H
@@ -668,8 +673,11 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 
 		results, err := h.qdrant.Search(c.Request.Context(), searchReq)
 		if err != nil {
+			slog.Error("GetAnomalies: search failed", "error", err, "point_id", point.ID)
 			continue
 		}
+
+		slog.Info("GetAnomalies: search results", "point_id", point.ID, "results_count", len(results))
 
 		// Find the nearest neighbor that isn't self
 		var nearestScore float32 = 1.0
@@ -686,7 +694,8 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 		// Generate preview URL
 		var previewURL string
 		if key, ok := point.Payload["key"].(string); ok {
-			previewURL, _ = h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
+			u, _ := h.storage.GetPresignedDownloadURL(c.Request.Context(), key, 1*time.Hour)
+			previewURL = toS3ProxyURL(u)
 		}
 
 		anomalies = append(anomalies, gin.H{
@@ -699,6 +708,8 @@ func (h *Handlers) GetAnomalies(c *gin.Context) {
 
 	// Sort by anomaly score (highest first)
 	// For simplicity, we'll return unsorted for now
+
+	slog.Info("GetAnomalies: returning response", "anomalies_count", len(anomalies))
 
 	c.JSON(http.StatusOK, gin.H{
 		"anomalies": anomalies,
@@ -733,6 +744,8 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"clusters": []any{}, "count": 0})
 		return
 	}
+
+	slog.Info("Deduplicate: fetched points", "count", len(points))
 
 	// compute simple pHash groups to reduce pair comparisons
 	type item struct {
@@ -773,6 +786,13 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 		buckets[prefix] = append(buckets[prefix], it)
 	}
 
+	slog.Info("Deduplicate: created buckets", "bucket_count", len(buckets))
+	for prefix, items := range buckets {
+		if len(items) > 1 {
+			slog.Info("Deduplicate: bucket with multiple items", "prefix", prefix, "count", len(items))
+		}
+	}
+
 	clusters := []gin.H{}
 	visited := map[interface{}]bool{}
 
@@ -790,8 +810,12 @@ func (h *Handlers) Deduplicate(c *gin.Context) {
 
 			// query nearest neighbors by seed id (no user filtering for learning project)
 			filter := map[string]interface{}{}
+			slog.Info("Deduplicate: searching by point", "seed_id", seed.id, "threshold", *req.ScoreThreshold)
 			neighbors, err := h.qdrant.SearchByPoint(c.Request.Context(), seed.id, 10, filter, req.ScoreThreshold)
-			if err == nil {
+			if err != nil {
+				slog.Error("Deduplicate: search by point failed", "error", err, "seed_id", seed.id)
+			} else {
+				slog.Info("Deduplicate: search by point succeeded", "seed_id", seed.id, "neighbors_count", len(neighbors))
 				for _, nb := range neighbors {
 					if nb.ID == seed.id {
 						continue
@@ -1048,8 +1072,8 @@ func toS3ProxyURL(raw string) string {
 	eu, err := url.Parse(endpoint)
 	if err != nil || eu.Scheme == "" || eu.Host == "" {
 		// best effort fallback
-		return strings.Replace(raw, "http://minio:9000", "/s3", 1)
+		return strings.Replace(raw, "http://minio:9000", "http://localhost:3000/s3", 1)
 	}
 	prefix := eu.Scheme + "://" + eu.Host
-	return strings.Replace(raw, prefix, "/s3", 1)
+	return strings.Replace(raw, prefix, "http://localhost:3000/s3", 1)
 }
